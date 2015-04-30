@@ -349,13 +349,28 @@ class dense_hashtable {
   int num_table_copies() const { return settings.num_ht_copies(); }
 
  private:
+  static void move_assignable(std::true_type, pointer dst, value_type&& src) {
+    *dst = std::move(src);
+  }
+
+  static void move_assignable(std::false_type, pointer dst, value_type&& src) {
+    dst->~value_type();   // delete the old value, if any
+    new(dst) value_type(std::move(src));
+  }
+
   // Annoyingly, we can't copy values around, because they might have
   // const components (they're probably pair<const X, Y>).  We use
   // explicit destructor invocation and placement new to get around
   // this.  Arg.
-  void set_value(pointer dst, const_reference src) {
+  static void set_value(pointer dst, const_reference src) {
     dst->~value_type();   // delete the old value, if any
     new(dst) value_type(src);
+  }
+
+  static void set_value(pointer dst, value_type&& src) {
+    // Roman: std::is_move_assignable<value_type>() returns true for pair<const int, int>
+    // (wrong behaviour) imho.
+    move_assignable(std::false_type(), dst, std::move(src));
   }
 
   void destroy_buckets(size_type first, size_type last) {
@@ -905,7 +920,7 @@ class dense_hashtable {
   // INSERTION ROUTINES
  private:
   // Private method used by insert_noresize and find_or_insert.
-  iterator insert_at(const_reference obj, size_type pos) {
+  void handle_insert_at(size_type pos) {
     if (size() >= max_size()) {
       throw std::length_error("insert overflow");
     }
@@ -918,8 +933,36 @@ class dense_hashtable {
     } else {
       ++num_elements;               // replacing an empty bucket
     }
+  }
+
+  iterator insert_at(const_reference obj, size_type pos) {
+    handle_insert_at(pos);
     set_value(&table[pos], obj);
     return iterator(this, table + pos, table + num_buckets, false);
+  }
+
+  iterator insert_at(value_type&& obj, size_type pos) {
+    handle_insert_at(pos);
+    set_value(&table[pos], std::move(obj));
+    return iterator(this, table + pos, table + num_buckets, false);
+  }
+
+  // If you know *this is big enough to hold obj, use this routine
+  std::pair<iterator, bool> insert_noresize(value_type&& obj) {
+    // First, double-check we're not inserting delkey or emptyval
+    assert((!settings.use_empty() || !equals(get_key(obj),
+                                             get_key(val_info.emptyval)))
+           && "Inserting the empty key");
+    assert((!settings.use_deleted() || !equals(get_key(obj), key_info.delkey))
+           && "Inserting the deleted key");
+    const std::pair<size_type,size_type> pos = find_position(get_key(obj));
+    if ( pos.first != ILLEGAL_BUCKET) {      // object was already there
+      return std::pair<iterator,bool>(iterator(this, table + pos.first,
+                                          table + num_buckets, false),
+                                 false);          // false: we didn't insert
+    } else {                                 // pos.second says where to put it
+      return std::pair<iterator,bool>(insert_at(std::move(obj), pos.second), true);
+    }
   }
 
   // If you know *this is big enough to hold obj, use this routine
@@ -968,6 +1011,12 @@ class dense_hashtable {
     return insert_noresize(obj);
   }
 
+  // This is the normal insert routine, used by the outside world
+  std::pair<iterator, bool> insert(value_type&& obj) {
+    resize_delta(1);                      // adding an object, grow if need be
+    return insert_noresize(std::move(obj));
+  }
+
   // When inserting a lot at a time, we specialize on the type of iterator
   template <class InputIterator>
   void insert(InputIterator f, InputIterator l) {
@@ -991,12 +1040,30 @@ class dense_hashtable {
       return table[pos.first];
     } else if (resize_delta(1)) {        // needed to rehash to make room
       // Since we resized, we can't use pos, so recalculate where to insert.
-      return *insert_noresize(default_value(key)).first;
+      return *insert_noresize(default_value.create(key)).first;
     } else {                             // no need to rehash, insert right here
-      return *insert_at(default_value(key), pos.second);
+      return *insert_at(default_value.create(key), pos.second);
     }
   }
 
+  template <class DefaultValue>
+  value_type& find_or_insert(key_type&& key) {
+    // First, double-check we're not inserting emptykey or delkey
+    assert((!settings.use_empty() || !equals(key, get_key(val_info.emptyval)))
+           && "Inserting the empty key");
+    assert((!settings.use_deleted() || !equals(key, key_info.delkey))
+           && "Inserting the deleted key");
+    const std::pair<size_type,size_type> pos = find_position(key);
+    DefaultValue default_value;
+    if ( pos.first != ILLEGAL_BUCKET) {  // object was already there
+      return table[pos.first];
+    } else if (resize_delta(1)) {        // needed to rehash to make room
+      // Since we resized, we can't use pos, so recalculate where to insert.
+      return *insert_noresize(default_value.create(std::move(key))).first;
+    } else {                             // no need to rehash, insert right here
+      return *insert_at(default_value.create(std::move(key)), pos.second);
+    }
+  }
 
   // DELETION ROUTINES
   size_type erase(const key_type& key) {

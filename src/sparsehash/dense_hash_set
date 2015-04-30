@@ -255,6 +255,18 @@ class dense_hash_set {
     std::pair<typename ht::iterator, bool> p = rep.insert(obj);
     return std::pair<iterator, bool>(p.first, p.second);   // const to non-const
   }
+
+  std::pair<iterator, bool> insert(value_type&& obj) {
+    std::pair<typename ht::iterator, bool> p = rep.insert(std::move(obj));
+    return std::pair<iterator, bool>(p.first, p.second);   // const to non-const
+  }
+
+  template <typename... _Args>
+  std::pair<iterator, bool> emplace(_Args&&... args) {
+    return insert(value_type(std::forward<_Args>(args)...));
+  }
+
+
   template <class InputIterator> void insert(InputIterator f, InputIterator l) {
     rep.insert(f, l);
   }

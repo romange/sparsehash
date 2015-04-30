@@ -128,12 +128,18 @@ class dense_hash_map {
       value->second = T();
     }
   };
+
   // For operator[].
   struct DefaultValue {
-    std::pair<const Key, T> operator()(const Key& key) {
-      return std::make_pair(key, T());
+    static std::pair<const Key, T> create(const Key& key) {
+      return std::pair<const Key, T>(key, T());
+    }
+
+    static std::pair<const Key, T> create(Key&& key) {
+      return std::pair<const Key, T>(std::move(key), T());
     }
   };
+
 
   // The actual data
   typedef dense_hashtable<std::pair<const Key, T>, Key, HashFcn, SelectKey,

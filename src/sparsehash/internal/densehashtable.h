@@ -349,9 +349,9 @@ class dense_hashtable {
   int num_table_copies() const { return settings.num_ht_copies(); }
 
  private:
-  static void move_assignable(std::true_type, pointer dst, value_type&& src) {
+  /*static void move_assignable(std::true_type, pointer dst, value_type&& src) {
     *dst = std::move(src);
-  }
+  }*/
 
   static void move_assignable(std::false_type, pointer dst, value_type&& src) {
     dst->~value_type();   // delete the old value, if any
@@ -367,7 +367,7 @@ class dense_hashtable {
     new(dst) value_type(src);
   }
 
-  static void set_value(pointer dst, value_type&& src) {
+  static void move_value(pointer dst, value_type&& src) {
     // Roman: std::is_move_assignable<value_type>() returns true for pair<const int, int>
     // (wrong behaviour) imho.
     move_assignable(std::false_type(), dst, std::move(src));
@@ -387,7 +387,7 @@ class dense_hashtable {
  private:
   void squash_deleted() {           // gets rid of any deleted entries we have
     if ( num_deleted ) {            // get rid of deleted before writing
-      dense_hashtable tmp(*this);   // copying will get rid of deleted
+      dense_hashtable tmp(std::move(*this));   // copying will get rid of deleted
       swap(tmp);                    // now we are tmp
     }
     assert(num_deleted == 0);
@@ -572,7 +572,7 @@ class dense_hashtable {
              num_remain < sz * shrink_factor) {
         sz /= 2;                            // stay a power of 2
       }
-      dense_hashtable tmp(*this, sz);       // Do the actual resizing
+      dense_hashtable tmp(std::move(*this), sz);       // Do the actual resizing
       swap(tmp);                            // now we are tmp
       retval = true;
     }
@@ -626,7 +626,7 @@ class dense_hashtable {
         resize_to *= 2;
       }
     }
-    dense_hashtable tmp(*this, resize_to);
+    dense_hashtable tmp(std::move(*this), resize_to);
     swap(tmp);                             // now we are tmp
     return true;
   }
@@ -642,6 +642,16 @@ class dense_hashtable {
     table = val_info.allocate(new_size);
   }
 
+  size_type find_free_bucket(size_type bucknum) const {
+    const size_type bucket_count_minus_one = bucket_count() - 1;
+    size_type num_probes = 0;              // how many times we've probed
+    for (bucknum &= bucket_count_minus_one; !test_empty(bucknum); // not empty
+       bucknum = (bucknum + JUMP_(key, num_probes)) & bucket_count_minus_one) {
+      ++num_probes;
+    }
+    return bucknum;
+  }
+
   // Used to actually do the rehashing when we grow/shrink a hashtable
   void copy_from(const dense_hashtable &ht, size_type min_buckets_wanted) {
     clear_to_size(settings.min_buckets(ht.size(), min_buckets_wanted));
@@ -651,21 +661,29 @@ class dense_hashtable {
     // no duplicates and no deleted items, we can be more efficient
     assert((bucket_count() & (bucket_count()-1)) == 0);      // a power of two
     for ( const_iterator it = ht.begin(); it != ht.end(); ++it ) {
-      size_type num_probes = 0;              // how many times we've probed
-      size_type bucknum;
-      const size_type bucket_count_minus_one = bucket_count() - 1;
-      for (bucknum = hash(get_key(*it)) & bucket_count_minus_one;
-           !test_empty(bucknum);                               // not empty
-           bucknum = (bucknum + JUMP_(key, num_probes)) & bucket_count_minus_one) {
-        ++num_probes;
-        assert(num_probes < bucket_count()
-               && "Hashtable is full: an error in key_equal<> or hash<>");
-      }
+      size_type bucknum = find_free_bucket(hash(get_key(*it)));
       set_value(&table[bucknum], *it);       // copies the value to here
       num_elements++;
     }
     settings.inc_num_ht_copies();
   }
+
+  void move_from(dense_hashtable&& ht, size_type min_buckets_wanted) {
+    clear_to_size(settings.min_buckets(ht.size(), min_buckets_wanted));
+
+    // We use a normal iterator to get non-deleted bcks from ht
+    // We could use insert() here, but since we know there are
+    // no duplicates and no deleted items, we can be more efficient
+    assert((bucket_count() & (bucket_count()-1)) == 0);      // a power of two
+
+    for (iterator it = ht.begin(); it != ht.end(); ++it ) {
+      size_type bucknum = find_free_bucket(hash(get_key(*it)));
+      move_value(&table[bucknum], std::move(*it));       // copies the value to here
+      num_elements++;
+    }
+    settings.inc_num_ht_copies();
+  }
+
 
   // Required by the spec for hashed associative container
  public:
@@ -718,7 +736,7 @@ class dense_hashtable {
 
   // As a convenience for resize(), we allow an optional second argument
   // which lets you make this new hashtable a different size than ht
-  dense_hashtable(const dense_hashtable& ht,
+  dense_hashtable(dense_hashtable&& ht,
                   size_type min_buckets_wanted = HT_DEFAULT_STARTING_BUCKETS)
       : settings(ht.settings),
         key_info(ht.key_info),
@@ -735,7 +753,27 @@ class dense_hashtable {
       return;
     }
     settings.reset_thresholds(bucket_count());
-    copy_from(ht, min_buckets_wanted);   // copy_from() ignores deleted entries
+    move_from(std::move(ht), min_buckets_wanted);   // copy_from() ignores deleted entries
+  }
+
+  // Copy c'tor.
+  dense_hashtable(const dense_hashtable& ht)
+      : settings(ht.settings),
+        key_info(ht.key_info),
+        num_deleted(0),
+        num_elements(0),
+        num_buckets(0),
+        val_info(ht.val_info),
+        table(NULL) {
+    if (!ht.settings.use_empty()) {
+      // If use_empty isn't set, copy_from will crash, so we do our own copying.
+      assert(ht.empty());
+      num_buckets = settings.min_buckets(ht.size(), HT_DEFAULT_STARTING_BUCKETS);
+      settings.reset_thresholds(bucket_count());
+      return;
+    }
+    settings.reset_thresholds(bucket_count());
+    copy_from(ht, HT_DEFAULT_STARTING_BUCKETS);   // copy_from() ignores deleted entries
   }
 
   dense_hashtable& operator= (const dense_hashtable& ht) {
@@ -943,7 +981,7 @@ class dense_hashtable {
 
   iterator insert_at(value_type&& obj, size_type pos) {
     handle_insert_at(pos);
-    set_value(&table[pos], std::move(obj));
+    move_value(&table[pos], std::move(obj));
     return iterator(this, table + pos, table + num_buckets, false);
   }
 

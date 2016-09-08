@@ -586,8 +586,8 @@ TYPED_TEST(HashtableIntTest, Typedefs) {
   typename TypeParam::const_pointer cp;
   // I can't declare variables of reference-type, since I have nothing
   // to point them to, so I just make sure that these types exist.
-  typedef typename TypeParam::reference r;
-  typedef typename TypeParam::const_reference cf;
+  __attribute__((unused)) typedef typename TypeParam::reference r;
+  __attribute__((unused)) typedef typename TypeParam::const_reference cf;
 
   typename TypeParam::iterator i;
   typename TypeParam::const_iterator ci;
@@ -901,7 +901,7 @@ TYPED_TEST(HashtableAllTest, Swap) {
 #ifdef _MSC_VER
   other_ht.swap(this->ht_);
 #else
-  swap(this->ht_, other_ht);
+  std::swap(this->ht_, other_ht);
 #endif
 
   EXPECT_EQ(this->UniqueKey(1), this->ht_.deleted_key());
@@ -1906,6 +1906,36 @@ TEST(HashtableTest, NestedHashtables) {
   ht3[1];
   ht3[2][3] = 4;
   dense_hash_map<int, DenseIntMap<int>, Hasher, Hasher> ht3copy = ht3;
+}
+
+TEST(HashtableTest, ResizeWithoutShrink) {
+  const size_t N = 1000000L;
+  const size_t max_entries = 40;
+#define KEY(i, j)  (i * 4 + j) * 28 + 11
+
+  dense_hash_map<size_t, int> ht;
+  ht.set_empty_key(0);
+  ht.set_deleted_key(1);
+  ht.min_load_factor(0);
+  ht.max_load_factor(0.2);
+
+  for (size_t i = 0; i < N; ++i) {
+    for (size_t j = 0; j < max_entries; ++j) {
+      size_t key = KEY(i, j);
+      ht[key] = 0;
+    }
+    for (size_t j = 0; j < max_entries / 2; ++j) {
+      size_t key = KEY(i, j);
+      ht.erase(key);
+      ht[key + 1] = 0;
+    }
+    for (size_t j = 0; j < max_entries; ++j) {
+      size_t key = KEY(i, j);
+      ht.erase(key);
+      ht.erase(key + (j < max_entries / 2));
+    }
+    EXPECT_LT(ht.bucket_count(), 4096);
+  }
 }
 
 TEST(HashtableDeathTest, ResizeOverflow) {
